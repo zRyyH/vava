@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Config with secrets (keep config.py, ignore local overrides)
+config.local.json
+*.env
+.env
+
+# PocketBase data
+pb_data/
+pocketbase
+
+# Arduino compiled output
+*.hex
+*.elf
+*.map
+build/
