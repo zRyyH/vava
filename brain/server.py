@@ -1,7 +1,8 @@
+from PySide6.QtCore import QObject, Signal
+import websockets
+import threading
 import asyncio
 import json
-import threading
-from PySide6.QtCore import QObject, Signal
 
 
 class ClientInfo:
@@ -12,8 +13,8 @@ class ClientInfo:
 
 
 class WinControlServer(QObject):
-    client_connected = Signal(str)       # client_id
-    client_disconnected = Signal(str)    # client_id
+    client_connected = Signal(str)  # client_id
+    client_disconnected = Signal(str)  # client_id
     response_received = Signal(str, dict)  # client_id, msg
     status_changed = Signal(str)
 
@@ -37,8 +38,9 @@ class WinControlServer(QObject):
         self._loop.run_until_complete(self._serve(host, port))
 
     async def _serve(self, host, port):
-        import websockets
-        self._server = await websockets.serve(self._handler, host, port, max_size=10 * 1024 * 1024)
+        self._server = await websockets.serve(
+            self._handler, host, port, max_size=10 * 1024 * 1024
+        )
         self.status_changed.emit(f"Server listening on {host}:{port}")
         await self._server.wait_closed()
 
@@ -67,9 +69,7 @@ class WinControlServer(QObject):
         rid = self._next_id
         self._next_id += 1
         msg = {"action": action, "id": rid, **params}
-        asyncio.run_coroutine_threadsafe(
-            client.ws.send(json.dumps(msg)), self._loop
-        )
+        asyncio.run_coroutine_threadsafe(client.ws.send(json.dumps(msg)), self._loop)
         return rid
 
     def get_client_ids(self) -> list[str]:
