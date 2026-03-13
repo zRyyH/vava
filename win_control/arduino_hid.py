@@ -193,7 +193,8 @@ class ArduinoHID:
         if port is None:
             raise RuntimeError("Arduino HID not found. Specify port or check USB connection.")
         self._ser = serial.Serial(port, self._baudrate, timeout=self._timeout)
-        time.sleep(0.1)  # let Arduino reset settle
+        time.sleep(2.0)  # let Arduino reset + bootloader settle
+        self._ser.reset_input_buffer()
         self.ping()  # verify communication
 
     @classmethod

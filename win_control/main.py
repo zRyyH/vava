@@ -4,23 +4,39 @@ All mouse/keyboard input is performed via the Arduino HID hardware controller.
 """
 
 import asyncio
+import base64
+import io
 import json
+import math
 import os
-import sys
+import string
 import subprocess
+import sys
+
+import numpy as np
 import websockets
+from PIL import Image
 import win32 as w
 import arduino_hid
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import serial.tools.list_ports as _serial_list_ports
+except ImportError:
+    _serial_list_ports = None
 
 DEFAULT_URL = "ws://127.0.0.1:8765"
 
 
 def dispatch(action, msg):
     if action == "list_com_ports":
-        import serial.tools.list_ports
         ports = [
             {"device": info.device, "description": info.description or info.device}
-            for info in serial.tools.list_ports.comports()
+            for info in _serial_list_ports.comports()
         ]
         return {"ports": ports}
     if action == "init_hid":
@@ -32,8 +48,6 @@ def dispatch(action, msg):
     if action == "list_directory":
         path = msg.get("path", "")
         if not path:
-            import string
-
             drives = []
             for letter in string.ascii_uppercase:
                 drive = f"{letter}:\\"
@@ -163,8 +177,6 @@ def dispatch(action, msg):
 
 def _match_templates(msg: dict) -> dict:
     """Captura screenshot e executa template matching para cada template enviado."""
-    import base64, io
-
     hwnd = msg.get("hwnd", 0)
     templates = msg.get("templates", [])
     if not templates:
@@ -192,8 +204,6 @@ def _match_templates(msg: dict) -> dict:
         border_dx = border_dy = 0
 
     # Converte BMP BGR-24 para numpy (H, W, 3)
-    import numpy as np
-
     row_stride = (src_w * 3 + 3) & ~3
     raw = np.frombuffer(bmp_data, dtype=np.uint8).reshape(src_h, row_stride)
     src_bgr = np.ascontiguousarray(raw[:, : src_w * 3].reshape(src_h, src_w, 3))
@@ -230,32 +240,22 @@ def _match_templates(msg: dict) -> dict:
 
 def _do_match(src_bgr, template_png_bytes: bytes) -> tuple[float, int, int]:
     """Retorna (confidence, x, y). Usa OpenCV se disponível, senão numpy NCC."""
-    import io, numpy as np
-    from PIL import Image
-
     timg = Image.open(io.BytesIO(template_png_bytes)).convert("RGB")
     tmpl_rgb = np.array(timg, dtype=np.uint8)
     tmpl_bgr = tmpl_rgb[:, :, ::-1]
 
-    try:
-        import cv2
-
+    if cv2 is not None:
         # Match in color (BGR) so that differently-colored regions don't get
         # falsely high confidence scores when structure/luminance is similar.
         res = cv2.matchTemplate(src_bgr, tmpl_bgr, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
         return float(max_val), max_loc[0], max_loc[1]
-    except ImportError:
-        pass
 
     return _ncc_numpy(src_bgr, tmpl_bgr)
 
 
 def _ncc_numpy(src: "np.ndarray", tmpl: "np.ndarray") -> tuple[float, int, int]:
     """Normalized cross-correlation via FFT (numpy). Per-channel, averaged."""
-    import math
-    import numpy as np
-
     sh, sw = src.shape[:2]
     th, tw = tmpl.shape[:2]
     oh, ow = sh - th + 1, sw - tw + 1

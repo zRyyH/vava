@@ -1,5 +1,7 @@
 """Convert raw BGR bitmap data to JPEG/PNG using Pillow (fast) or stdlib fallback."""
 import io
+import struct
+import zlib
 
 try:
     from PIL import Image as _Image
@@ -26,7 +28,6 @@ def raw_bgr_to_png(width, height, bgr_data):
         img.save(buf, 'PNG', compress_level=1)
         return buf.getvalue()
 
-    import struct, zlib
     stride = (width * 3 + 3) & ~3
     raw_rows = []
     for y in range(height):
