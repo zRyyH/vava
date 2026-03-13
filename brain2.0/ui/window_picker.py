@@ -1,38 +1,38 @@
 """
-window_picker.py – Utilitários para selecionar X, Y e RGB a partir de uma
-janela do sistema.
+Utilitários para selecionar coordenada X/Y e cor RGB a partir de uma janela.
 
-Fluxo:
-  1. WindowPickerDialog  – lista as janelas visíveis; retorna (hwnd, título).
-  2. WindowMirrorDialog  – captura a janela escolhida e mostra um espelho
-                           interativo; hover atualiza coords/RGB em tempo
-                           real; clique confirma a seleção.
+Fluxo público:
+  pick_from_window()      → dict {x, y, r, g, b} ou None
+  pick_region_from_window() → QPixmap recortada ou None
 """
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as _w
 
-from PySide6.QtCore import Qt, QPoint, QTimer
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-# ── Win32 structs/bindings ────────────────────────────────────────────────────
+# ── Win32 structs ─────────────────────────────────────────────────────────────
 
 _user32 = ctypes.windll.user32
 _gdi32  = ctypes.windll.gdi32
 
+_DIB_RGB_COLORS = 0
+_SRCCOPY        = 0x00CC0020
+
 
 class _BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
-        ("biSize",          _w.DWORD), ("biWidth",       _w.LONG),
-        ("biHeight",        _w.LONG),  ("biPlanes",      _w.WORD),
-        ("biBitCount",      _w.WORD),  ("biCompression", _w.DWORD),
+        ("biSize",          _w.DWORD), ("biWidth",         _w.LONG),
+        ("biHeight",        _w.LONG),  ("biPlanes",        _w.WORD),
+        ("biBitCount",      _w.WORD),  ("biCompression",   _w.DWORD),
         ("biSizeImage",     _w.DWORD), ("biXPelsPerMeter", _w.LONG),
-        ("biYPelsPerMeter", _w.LONG),  ("biClrUsed",     _w.DWORD),
+        ("biYPelsPerMeter", _w.LONG),  ("biClrUsed",       _w.DWORD),
         ("biClrImportant",  _w.DWORD),
     ]
 
@@ -41,16 +41,13 @@ class _BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", _w.DWORD * 3)]
 
 
-_DIB_RGB_COLORS = 0
-_SRCCOPY = 0x00CC0020
-
-
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+# ── Win32 helpers ─────────────────────────────────────────────────────────────
+
 def _enum_visible_windows() -> list[tuple[int, str]]:
-    """Retorna lista de (hwnd, título) de janelas visíveis com título."""
     results: list[tuple[int, str]] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, _w.HWND, _w.LPARAM)
@@ -60,8 +57,7 @@ def _enum_visible_windows() -> list[tuple[int, str]]:
             if length > 0:
                 buf = ctypes.create_unicode_buffer(length + 1)
                 _user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value.strip()
-                if title:
+                if title := buf.value.strip():
                     results.append((hwnd, title))
         return True
 
@@ -70,60 +66,49 @@ def _enum_visible_windows() -> list[tuple[int, str]]:
 
 
 def _capture_window(hwnd: int) -> QPixmap | None:
-    """
-    Captura apenas a área cliente da janela (sem título/bordas).
-    Usa PrintWindow(PW_RENDERFULLCONTENT) + BitBlt para extrair só o cliente.
-    """
-    # Tamanho da janela completa (para PrintWindow)
+    """Captura a área cliente da janela (sem título/bordas)."""
     win_rect = _w.RECT()
     _user32.GetWindowRect(hwnd, ctypes.byref(win_rect))
-    ww = win_rect.right  - win_rect.left
+    ww = win_rect.right - win_rect.left
     wh = win_rect.bottom - win_rect.top
     if ww <= 0 or wh <= 0:
         return None
 
-    # Área cliente: tamanho e posição em tela
     cli_rect = _w.RECT()
     _user32.GetClientRect(hwnd, ctypes.byref(cli_rect))
-    cw = cli_rect.right   # largura do cliente
-    ch = cli_rect.bottom  # altura do cliente
+    cw, ch = cli_rect.right, cli_rect.bottom
     if cw <= 0 or ch <= 0:
         return None
 
     pt = _POINT(0, 0)
     _user32.ClientToScreen(hwnd, ctypes.byref(pt))
-    dx = pt.x - win_rect.left   # offset horizontal do cliente na bitmap da janela
-    dy = pt.y - win_rect.top    # offset vertical  do cliente na bitmap da janela
+    dx = pt.x - win_rect.left
+    dy = pt.y - win_rect.top
 
     hwnd_dc  = _user32.GetDC(hwnd)
-    # 1. Renderiza janela inteira via PrintWindow
     full_dc  = _gdi32.CreateCompatibleDC(hwnd_dc)
     full_bmp = _gdi32.CreateCompatibleBitmap(hwnd_dc, ww, wh)
     _gdi32.SelectObject(full_dc, full_bmp)
-    _user32.PrintWindow(hwnd, full_dc, 2)  # PW_RENDERFULLCONTENT
+    _user32.PrintWindow(hwnd, full_dc, 2)
 
-    # 2. Extrai apenas a região cliente para um novo bitmap
     cli_dc  = _gdi32.CreateCompatibleDC(hwnd_dc)
     cli_bmp = _gdi32.CreateCompatibleBitmap(hwnd_dc, cw, ch)
     _gdi32.SelectObject(cli_dc, cli_bmp)
     _gdi32.BitBlt(cli_dc, 0, 0, cw, ch, full_dc, dx, dy, _SRCCOPY)
 
     bmi = _BITMAPINFO()
-    bmi.bmiHeader.biSize        = ctypes.sizeof(_BITMAPINFOHEADER)
-    bmi.bmiHeader.biWidth       = cw
-    bmi.bmiHeader.biHeight      = -ch  # top-down
-    bmi.bmiHeader.biPlanes      = 1
-    bmi.bmiHeader.biBitCount    = 24
-    bmi.bmiHeader.biCompression = 0
+    bmi.bmiHeader.biSize     = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth    = cw
+    bmi.bmiHeader.biHeight   = -ch
+    bmi.bmiHeader.biPlanes   = 1
+    bmi.bmiHeader.biBitCount = 24
 
-    stride   = (cw * 3 + 3) & ~3
-    buf      = ctypes.create_string_buffer(stride * ch)
+    stride = (cw * 3 + 3) & ~3
+    buf = ctypes.create_string_buffer(stride * ch)
     _gdi32.GetDIBits(cli_dc, cli_bmp, 0, ch, buf, ctypes.byref(bmi), _DIB_RGB_COLORS)
 
-    _gdi32.DeleteObject(cli_bmp)
-    _gdi32.DeleteDC(cli_dc)
-    _gdi32.DeleteObject(full_bmp)
-    _gdi32.DeleteDC(full_dc)
+    _gdi32.DeleteObject(cli_bmp); _gdi32.DeleteDC(cli_dc)
+    _gdi32.DeleteObject(full_bmp); _gdi32.DeleteDC(full_dc)
     _user32.ReleaseDC(hwnd, hwnd_dc)
 
     img = QImage(bytes(buf), cw, ch, stride, QImage.Format.Format_BGR888)
@@ -133,7 +118,7 @@ def _capture_window(hwnd: int) -> QPixmap | None:
 # ── WindowPickerDialog ────────────────────────────────────────────────────────
 
 class WindowPickerDialog(QDialog):
-    """Mostra a lista de janelas abertas; ao confirmar devolve (hwnd, título)."""
+    """Lista janelas abertas; retorna (hwnd, título) ao confirmar."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -143,9 +128,8 @@ class WindowPickerDialog(QDialog):
         self._title: str = ""
 
         layout = QVBoxLayout(self)
-
         self._list = QListWidget()
-        self._list.itemDoubleClicked.connect(self._on_double_click)
+        self._list.itemDoubleClicked.connect(self._accept)
         layout.addWidget(self._list)
 
         btn_refresh = QPushButton("↺ Atualizar lista")
@@ -153,7 +137,7 @@ class WindowPickerDialog(QDialog):
         layout.addWidget(btn_refresh)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._on_accept)
+        btns.accepted.connect(self._accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
@@ -166,10 +150,7 @@ class WindowPickerDialog(QDialog):
             item.setData(Qt.UserRole, (hwnd, title))
             self._list.addItem(item)
 
-    def _on_double_click(self, item: QListWidgetItem):
-        self._on_accept()
-
-    def _on_accept(self):
+    def _accept(self, _item=None):
         item = self._list.currentItem()
         if item is None:
             return
@@ -180,32 +161,39 @@ class WindowPickerDialog(QDialog):
         return self._hwnd, self._title
 
 
+# ── _ClickableLabel ───────────────────────────────────────────────────────────
+
+class _ClickableLabel(QLabel):
+    mouse_moved   = Signal(QPoint)
+    mouse_clicked = Signal(QPoint)
+
+    def mouseMoveEvent(self, event):
+        self.mouse_moved.emit(event.position().toPoint())
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.mouse_clicked.emit(event.position().toPoint())
+
+
 # ── WindowMirrorDialog ────────────────────────────────────────────────────────
 
 class WindowMirrorDialog(QDialog):
     """
-    Exibe o espelho (screenshot) de uma janela.
-
-    Após o usuário clicar na imagem, .picked_x, .picked_y, .picked_r,
-    .picked_g e .picked_b são preenchidos e o diálogo é aceito.
+    Exibe espelho interativo de uma janela.
+    Após clique: .picked_x, .picked_y, .picked_r, .picked_g, .picked_b.
     """
 
     def __init__(self, hwnd: int, title: str, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle(f"Espelho – {title}")
+        self.setWindowTitle(f"Espelho — {title}")
         self._hwnd = hwnd
         self._pixmap: QPixmap | None = None
-
-        self.picked_x: int = 0
-        self.picked_y: int = 0
-        self.picked_r: int = 0
-        self.picked_g: int = 0
-        self.picked_b: int = 0
+        self.picked_x = self.picked_y = 0
+        self.picked_r = self.picked_g = self.picked_b = 0
 
         self._build_ui()
         self._refresh_capture()
 
-        # Atualização periódica da captura (500 ms)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_capture)
         self._timer.start(500)
@@ -215,11 +203,10 @@ class WindowMirrorDialog(QDialog):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # Barra de status: coords + cor
         bar = QHBoxLayout()
         self._lbl_coords = QLabel("X: –  Y: –")
-        self._lbl_rgb = QLabel("RGB: –")
-        self._lbl_color = QLabel("   ")
+        self._lbl_rgb    = QLabel("RGB: –")
+        self._lbl_color  = QLabel("   ")
         self._lbl_color.setAutoFillBackground(True)
         self._lbl_color.setFixedWidth(28)
         bar.addWidget(self._lbl_coords)
@@ -227,15 +214,12 @@ class WindowMirrorDialog(QDialog):
         bar.addWidget(self._lbl_rgb)
         bar.addWidget(self._lbl_color)
         bar.addStretch()
-
         btn_refresh = QPushButton("↺")
         btn_refresh.setFixedWidth(28)
-        btn_refresh.setToolTip("Recapturar janela")
         btn_refresh.clicked.connect(self._refresh_capture)
         bar.addWidget(btn_refresh)
         layout.addLayout(bar)
 
-        # Área de scroll com a imagem
         self._img_label = _ClickableLabel()
         self._img_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._img_label.setMouseTracking(True)
@@ -247,32 +231,29 @@ class WindowMirrorDialog(QDialog):
         scroll.setWidgetResizable(False)
         layout.addWidget(scroll, 1)
 
-        # Botão cancelar
         btn_cancel = QPushButton("Cancelar")
         btn_cancel.clicked.connect(self.reject)
         layout.addWidget(btn_cancel)
 
     def _refresh_capture(self):
         px = _capture_window(self._hwnd)
-        if px is not None:
-            first_capture = self._pixmap is None
-            self._pixmap = px
-            self._img_label.setPixmap(px)
-            self._img_label.resize(px.size())
-            if first_capture:
-                # Redimensiona o diálogo para o tamanho da janela alvo na primeira captura
-                from PySide6.QtWidgets import QApplication
-                screen = (self.screen()
-                          or (self.windowHandle() and self.windowHandle().screen())
-                          or QApplication.primaryScreen())
-                max_w = max_h = 0
-                if screen:
-                    geom = screen.availableGeometry()
-                    max_w, max_h = geom.width() - 40, geom.height() - 80
-                extra_h = 80  # status bar + botão cancelar
-                w = px.width() if not max_w else min(px.width(), max_w)
-                h = px.height() + extra_h if not max_h else min(px.height() + extra_h, max_h)
-                self.resize(w, h)
+        if px is None:
+            return
+        first = self._pixmap is None
+        self._pixmap = px
+        self._img_label.setPixmap(px)
+        self._img_label.resize(px.size())
+        if first:
+            screen = (self.screen()
+                      or (self.windowHandle() and self.windowHandle().screen())
+                      or QApplication.primaryScreen())
+            max_w = max_h = 0
+            if screen:
+                geom = screen.availableGeometry()
+                max_w, max_h = geom.width() - 40, geom.height() - 80
+            w = px.width()  if not max_w else min(px.width(), max_w)
+            h = px.height() + 80 if not max_h else min(px.height() + 80, max_h)
+            self.resize(w, h)
 
     def _pixel_rgb(self, x: int, y: int) -> tuple[int, int, int] | None:
         if self._pixmap is None:
@@ -309,31 +290,12 @@ class WindowMirrorDialog(QDialog):
         super().closeEvent(event)
 
 
-# ── _ClickableLabel ───────────────────────────────────────────────────────────
-
-from PySide6.QtCore import Signal, QRect  # noqa: E402
-from PySide6.QtGui import QPainter, QPen, QBrush, QColor as _QColor  # noqa: E402
-
-
-class _ClickableLabel(QLabel):
-    mouse_moved = Signal(QPoint)
-    mouse_clicked = Signal(QPoint)
-
-    def mouseMoveEvent(self, event):
-        self.mouse_moved.emit(event.position().toPoint())
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.mouse_clicked.emit(event.position().toPoint())
-
-
-# ── RegionSelectDialog ────────────────────────────────────────────────────────
+# ── _RegionLabel ──────────────────────────────────────────────────────────────
 
 class _RegionLabel(QLabel):
-    """Label com rubber-band para selecionar região."""
     region_selected = Signal(QRect)
 
-    def __init__(self, pixmap: "QPixmap"):
+    def __init__(self, pixmap: QPixmap):
         super().__init__()
         self.setPixmap(pixmap)
         self.resize(pixmap.size())
@@ -354,10 +316,8 @@ class _RegionLabel(QLabel):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._start is not None:
-            end = event.position().toPoint()
-            rect = QRect(self._start, end).normalized()
-            self._start = None
-            self._current = None
+            rect = QRect(self._start, event.position().toPoint()).normalized()
+            self._start = self._current = None
             self.update()
             if rect.width() > 4 and rect.height() > 4:
                 self.region_selected.emit(rect)
@@ -366,36 +326,31 @@ class _RegionLabel(QLabel):
         super().paintEvent(event)
         if self._start and self._current:
             painter = QPainter(self)
-            pen = QPen(_QColor(255, 80, 80), 2, Qt.DashLine)
-            painter.setPen(pen)
-            brush = QBrush(_QColor(255, 80, 80, 40))
-            painter.setBrush(brush)
+            painter.setPen(QPen(QColor(255, 80, 80), 2, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(255, 80, 80, 40)))
             painter.drawRect(QRect(self._start, self._current).normalized())
             painter.end()
 
 
+# ── RegionSelectDialog ────────────────────────────────────────────────────────
+
 class RegionSelectDialog(QDialog):
-    """
-    Mostra o espelho de uma janela e deixa o usuário selecionar uma região.
-    Após seleção, `.selected_pixmap` contém o recorte como QPixmap.
-    """
+    """Mostra espelho da janela e permite selecionar uma região."""
 
     def __init__(self, hwnd: int, title: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Selecionar região — {title}")
         self._hwnd = hwnd
-        self.selected_pixmap: "QPixmap | None" = None
-        self._full_pixmap: "QPixmap | None" = None
-        self._sized_to_window = False
+        self.selected_pixmap: QPixmap | None = None
+        self._full_pixmap: QPixmap | None = None
+        self._sized = False
 
         lay = QVBoxLayout(self)
         lay.setSpacing(4)
 
-        self._lbl_hint = QLabel(
-            "Clique e arraste para selecionar a região que será usada como template."
-        )
-        self._lbl_hint.setStyleSheet("color: #aaa; font-size: 11px;")
-        lay.addWidget(self._lbl_hint)
+        hint = QLabel("Clique e arraste para selecionar a região do template.")
+        hint.setStyleSheet("color:#aaa; font-size:11px;")
+        lay.addWidget(hint)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(False)
@@ -406,7 +361,7 @@ class RegionSelectDialog(QDialog):
 
         bar = QHBoxLayout()
         self._lbl_preview = QLabel("Nenhuma região selecionada.")
-        self._lbl_preview.setStyleSheet("color: #aaa;")
+        self._lbl_preview.setStyleSheet("color:#aaa;")
         bar.addWidget(self._lbl_preview, 1)
         btn_refresh = QPushButton("↺ Recapturar")
         btn_refresh.clicked.connect(self._refresh)
@@ -421,38 +376,36 @@ class RegionSelectDialog(QDialog):
         lay.addWidget(btns)
 
         self._refresh()
-
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(1000)
 
     def _refresh(self):
         px = _capture_window(self._hwnd)
-        if px:
-            self._full_pixmap = px
-            self._region_label.setPixmap(px)
-            self._region_label.resize(px.size())
-            if not self._sized_to_window:
-                self._sized_to_window = True
-                screen = self.screen().availableGeometry()
-                chrome_h = 120  # hint label + bottom bar + buttons
-                w = min(px.width(), screen.width() - 40)
-                h = min(px.height() + chrome_h, screen.height() - 40)
-                self.resize(w, h)
-                self.move(
-                    screen.x() + (screen.width() - w) // 2,
-                    screen.y() + (screen.height() - h) // 2,
-                )
+        if not px:
+            return
+        self._full_pixmap = px
+        self._region_label.setPixmap(px)
+        self._region_label.resize(px.size())
+        if not self._sized:
+            self._sized = True
+            screen = self.screen().availableGeometry()
+            w = min(px.width(), screen.width() - 40)
+            h = min(px.height() + 120, screen.height() - 40)
+            self.resize(w, h)
+            self.move(
+                screen.x() + (screen.width()  - w) // 2,
+                screen.y() + (screen.height() - h) // 2,
+            )
 
     def _on_region_selected(self, rect: QRect):
         if self._full_pixmap is None:
             return
-        cropped = self._full_pixmap.copy(rect)
-        self.selected_pixmap = cropped
+        self.selected_pixmap = self._full_pixmap.copy(rect)
         self._lbl_preview.setText(
             f"Região selecionada: {rect.width()}×{rect.height()} px — confirme com OK."
         )
-        self._lbl_preview.setStyleSheet("color: #4ec94e;")
+        self._lbl_preview.setStyleSheet("color:#4ec94e;")
         self._btn_ok.setEnabled(True)
 
     def _on_accept(self):
@@ -465,13 +418,27 @@ class RegionSelectDialog(QDialog):
         super().closeEvent(event)
 
 
-# ── Função utilitária pública ─────────────────────────────────────────────────
+# ── Funções públicas ──────────────────────────────────────────────────────────
 
-def pick_region_from_window(parent: QWidget | None = None) -> "QPixmap | None":
-    """
-    Abre fluxo: picker de janela → seleção de região.
-    Retorna QPixmap recortada ou None se cancelado.
-    """
+def pick_from_window(parent: QWidget | None = None) -> dict | None:
+    """Picker de janela → espelho interativo. Retorna {x, y, r, g, b} ou None."""
+    picker = WindowPickerDialog(parent)
+    if picker.exec() != QDialog.Accepted:
+        return None
+    hwnd, title = picker.selected()
+    if not hwnd:
+        return None
+    mirror = WindowMirrorDialog(hwnd, title, parent)
+    if mirror.exec() != QDialog.Accepted:
+        return None
+    return {
+        "x": mirror.picked_x, "y": mirror.picked_y,
+        "r": mirror.picked_r, "g": mirror.picked_g, "b": mirror.picked_b,
+    }
+
+
+def pick_region_from_window(parent: QWidget | None = None) -> QPixmap | None:
+    """Picker de janela → seleção de região. Retorna QPixmap recortada ou None."""
     picker = WindowPickerDialog(parent)
     if picker.exec() != QDialog.Accepted:
         return None
@@ -482,29 +449,3 @@ def pick_region_from_window(parent: QWidget | None = None) -> "QPixmap | None":
     if dlg.exec() != QDialog.Accepted:
         return None
     return dlg.selected_pixmap
-
-
-def pick_from_window(parent: QWidget | None = None) -> dict | None:
-    """
-    Abre o fluxo completo (picker → espelho) e retorna um dict:
-      {'x': int, 'y': int, 'r': int, 'g': int, 'b': int}
-    ou None se o usuário cancelar.
-    """
-    picker = WindowPickerDialog(parent)
-    if picker.exec() != QDialog.Accepted:
-        return None
-    hwnd, title = picker.selected()
-    if not hwnd:
-        return None
-
-    mirror = WindowMirrorDialog(hwnd, title, parent)
-    if mirror.exec() != QDialog.Accepted:
-        return None
-
-    return {
-        "x": mirror.picked_x,
-        "y": mirror.picked_y,
-        "r": mirror.picked_r,
-        "g": mirror.picked_g,
-        "b": mirror.picked_b,
-    }

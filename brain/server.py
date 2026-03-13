@@ -62,13 +62,20 @@ class WinControlServer(QObject):
             self.client_disconnected.emit(client_id)
             self.status_changed.emit(f"Client disconnected: {client_id}")
 
-    def send_command(self, client_id: str, action: str, **params) -> int | None:
+    def send_command(self, client_id: str, action: str, params: dict | None = None) -> int | None:
         client = self._clients.get(client_id)
         if not client or not self._loop:
             return None
         rid = self._next_id
         self._next_id += 1
-        msg = {"action": action, "id": rid, **params}
+        msg = {"id": rid, "action": action}
+        if params:
+            for k, v in params.items():
+                if k == "action":
+                    # sub-ação de window_action: enviar como "wa" para não conflitar com o protocolo
+                    msg["wa"] = v
+                else:
+                    msg[k] = v
         asyncio.run_coroutine_threadsafe(client.ws.send(json.dumps(msg)), self._loop)
         return rid
 

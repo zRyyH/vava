@@ -16,6 +16,19 @@ DEFAULT_URL = "ws://127.0.0.1:8765"
 
 
 def dispatch(action, msg):
+    if action == "list_com_ports":
+        import serial.tools.list_ports
+        ports = [
+            {"device": info.device, "description": info.description or info.device}
+            for info in serial.tools.list_ports.comports()
+        ]
+        return {"ports": ports}
+    if action == "init_hid":
+        port = msg.get("port") or None
+        print(f"Reinitializing Arduino HID on port {port or 'auto-detect'}...")
+        arduino_hid.init(port=port)
+        print("Arduino HID ready.")
+        return {"port": port or "auto-detect"}
     if action == "list_directory":
         path = msg.get("path", "")
         if not path:
@@ -40,6 +53,26 @@ def dispatch(action, msg):
         return w.list_windows()
     if action == "get_window":
         return w.get_window_info(msg["hwnd"])
+    if action == "get_window_state":
+        hwnd = msg["hwnd"]
+        info = w.get_window_info(hwnd)
+        return {
+            "hwnd": hwnd,
+            "minimized": info["minimized"],
+            "maximized": info["maximized"],
+            "width": info["rect"]["w"],
+            "height": info["rect"]["h"],
+            "x": info["rect"]["x"],
+            "y": info["rect"]["y"],
+            "visible": info["visible"],
+        }
+    if action == "check_processes":
+        paths = msg.get("paths", [])
+        results = []
+        for path in paths:
+            windows = w.find_process_windows(path)
+            results.append({"path": path, "running": len(windows) > 0, "windows": windows})
+        return {"results": results}
     if action == "get_pixels":
         return w.get_pixels(msg["positions"])
     if action == "focus":
@@ -65,6 +98,36 @@ def dispatch(action, msg):
         args = msg.get("args", [])
         proc = subprocess.Popen([path] + args)
         return {"pid": proc.pid}
+    elif action == "window_action":
+        hwnd = msg.get("hwnd", 0)
+        wa = msg.get("wa", "") or msg.get("action", "")
+        if wa == "minimize":
+            w.minimize_window(hwnd)
+        elif wa == "maximize":
+            w.maximize_window(hwnd)
+        elif wa == "restore":
+            w.restore_window(hwnd)
+        elif wa == "close":
+            w.close_window(hwnd)
+        elif wa in ("focus", "bring_to_front"):
+            w.focus_window(hwnd)
+        elif wa == "resize":
+            w.move_resize_window(hwnd, msg.get("x", 0), msg.get("y", 0),
+                                 msg.get("width", 800), msg.get("height", 600))
+        elif wa == "move":
+            info = w.get_window_info(hwnd)
+            w.move_resize_window(hwnd, msg.get("x", 0), msg.get("y", 0),
+                                 info["rect"]["w"], info["rect"]["h"])
+        elif wa == "set_fullscreen":
+            w.set_fullscreen(hwnd)
+        elif wa == "set_windowed":
+            w.set_windowed(hwnd)
+        elif wa == "open_window":
+            path = msg.get("path", "")
+            if path:
+                args = msg.get("args", [])
+                proc = subprocess.Popen([path] + args)
+                return {"pid": proc.pid}
     elif action == "click":
         x, y = msg["x"], msg["y"]
         hwnd = msg.get("hwnd", 0)
@@ -80,7 +143,15 @@ def dispatch(action, msg):
             x, y = x + ox, y + oy
         arduino_hid.get().mouse_move_abs(x, y)
     elif action == "key_press":
-        arduino_hid.get().vk_press(msg["vk"])
+        hid = arduino_hid.get()
+        modifiers = msg.get("modifiers", [])
+        mod_hids = [arduino_hid.vk_to_hid(m) for m in modifiers]
+        mod_hids = [h for h in mod_hids if h is not None]
+        for h in mod_hids:
+            hid.key_press(h)
+        hid.vk_press(msg["vk"])
+        for h in reversed(mod_hids):
+            hid.key_release(h)
     elif action == "type_text":
         arduino_hid.get().type_text(msg["text"])
     elif action == "match_templates":

@@ -1,68 +1,34 @@
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QPushButton, QLabel,
-)
-from PySide6.QtCore import Qt, QThread, Signal
+from __future__ import annotations
 
-from server import WinControlServer
-from ui.macro_panel import MacroPanel
-from ui.config_panel import ConfigPanel
-from ui.log_panel import LogPanel
-from ui.styles import DARK_STYLE
-from hotkey import GlobalHotkey
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QStackedWidget, QVBoxLayout, QWidget,
+)
+
 import config as _cfg
 import pocketbase_client as _pb
+from hotkey import GlobalHotkey
+from server import WinControlServer
+from ui.config_panel import ConfigPanel
+from ui.log_panel import LogPanel
+from ui.macro import MacroPanel
+from ui.styles import DARK_STYLE
 
+# ── Constantes de layout ──────────────────────────────────────────────────────
 
-class _SidebarPage(QWidget):
-    """Panel shown in the secondary sidebar for a nav section."""
-
-    def __init__(self, title: str, extra_widgets: list, embedded: QWidget | None = None):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 14, 10, 8)
-        lay.setSpacing(8)
-
-        lbl = QLabel(title.upper())
-        lbl.setStyleSheet("color:#888; font-size:10px; font-weight:bold; letter-spacing:1px;")
-        lay.addWidget(lbl)
-
-        for w in extra_widgets:
-            lay.addWidget(w)
-
-        if embedded is not None:
-            lay.addWidget(embedded, 1)
-        else:
-            lay.addStretch(1)
-
-
-_ICON_BAR_W = 54   # narrow icon-only strip
-_PAGE_BAR_W = 220  # wider page sidebar (shown inside content)
+_ICON_BAR_W  = 54
+_PAGE_BAR_W  = 220
 
 _ICON_BTN_STYLE = """
 QPushButton {
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    font-size: 20px;
-    color: #666;
-    padding: 0;
+    border: none; border-radius: 6px; background: transparent;
+    font-size: 20px; color: #666; padding: 0;
 }
 QPushButton:hover  { background: #2a2a2a; color: #ccc; }
 QPushButton:checked {
-    background: #1a3a5c;
-    color: #6ec6f5;
-    border-left: 3px solid #6ec6f5;
-    border-radius: 0;
-}
-"""
-
-_ICON_BAR_STYLE = "QWidget#iconbar { background:#151515; border-right:1px solid #2e2e2e; }"
-
-_PAGE_SIDEBAR_STYLE = """
-QWidget#pagesidebar {
-    background: #1a1a1a;
-    border-right: 1px solid #2e2e2e;
+    background: #1a3a5c; color: #6ec6f5;
+    border-left: 3px solid #6ec6f5; border-radius: 0;
 }
 """
 
@@ -73,17 +39,31 @@ class _PBAuthThread(QThread):
 
     def __init__(self, url: str, email: str, password: str, parent=None):
         super().__init__(parent)
-        self._url = url
-        self._email = email
+        self._url      = url
+        self._email    = email
         self._password = password
 
     def run(self):
         try:
             client = _pb.init_shared(self._url, self._email, self._password)
-            token = client.authenticate()
-            self.success.emit(token)
+            self.success.emit(client.authenticate())
         except Exception as exc:
             self.failure.emit(str(exc))
+
+
+class _SidebarPage(QWidget):
+    def __init__(self, title: str, embedded: QWidget | None = None):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 14, 10, 8)
+        lay.setSpacing(8)
+        lbl = QLabel(title.upper())
+        lbl.setStyleSheet("color:#888; font-size:10px; font-weight:bold; letter-spacing:1px;")
+        lay.addWidget(lbl)
+        if embedded is not None:
+            lay.addWidget(embedded, 1)
+        else:
+            lay.addStretch(1)
 
 
 class MainWindow(QMainWindow):
@@ -95,6 +75,7 @@ class MainWindow(QMainWindow):
         self.server = WinControlServer()
         self._active_client: str | None = None
         self._connected_clients: set[str] = set()
+        self._last_window_count: int | None = None
 
         self._build_ui()
         self._connect_signals()
@@ -113,11 +94,11 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── icon bar (leftmost strip) ─────────────────────────────────────────
+        # icon bar
         icon_bar = QWidget()
         icon_bar.setObjectName("iconbar")
         icon_bar.setFixedWidth(_ICON_BAR_W)
-        icon_bar.setStyleSheet(_ICON_BAR_STYLE)
+        icon_bar.setStyleSheet("QWidget#iconbar { background:#151515; border-right:1px solid #2e2e2e; }")
         ib_lay = QVBoxLayout(icon_bar)
         ib_lay.setContentsMargins(4, 8, 4, 8)
         ib_lay.setSpacing(2)
@@ -128,62 +109,60 @@ class MainWindow(QMainWindow):
         ib_lay.addWidget(brand)
 
         self._icon_buttons: list[QPushButton] = []
-        self._stacked = QStackedWidget()
-
-        # ── page sidebar (secondary panel, shown beside icon bar) ─────────────
-        self._page_sidebar = QWidget()
-        self._page_sidebar.setObjectName("pagesidebar")
-        self._page_sidebar.setFixedWidth(_PAGE_BAR_W)
-        self._page_sidebar.setStyleSheet(_PAGE_SIDEBAR_STYLE)
-        ps_lay = QVBoxLayout(self._page_sidebar)
-        ps_lay.setContentsMargins(0, 0, 0, 0)
-        ps_lay.setSpacing(0)
+        self._stacked      = QStackedWidget()
         self._page_stacked = QStackedWidget()
+
+        page_sidebar = QWidget()
+        page_sidebar.setObjectName("pagesidebar")
+        page_sidebar.setFixedWidth(_PAGE_BAR_W)
+        page_sidebar.setStyleSheet(
+            "QWidget#pagesidebar { background:#1a1a1a; border-right:1px solid #2e2e2e; }"
+        )
+        ps_lay = QVBoxLayout(page_sidebar)
+        ps_lay.setContentsMargins(0, 0, 0, 0)
         ps_lay.addWidget(self._page_stacked)
 
-        def _page(icon: str, tooltip: str, sidebar_widget: QWidget, main_widget: QWidget) -> QPushButton:
-            btn = QPushButton(icon)
-            btn.setCheckable(True)
-            btn.setToolTip(tooltip)
-            btn.setStyleSheet(_ICON_BTN_STYLE)
-            btn.setFixedSize(_ICON_BAR_W - 8, 44)
-
-            idx = len(self._icon_buttons)
-            self._page_stacked.addWidget(sidebar_widget)
-            self._stacked.addWidget(main_widget)
-
-            btn.clicked.connect(lambda _, i=idx: self._switch_page(i))
-            self._icon_buttons.append(btn)
-            ib_lay.addWidget(btn, 0, Qt.AlignHCenter)
-            return btn
-
-        # Build panels
-        self.macro_panel = MacroPanel()
+        # panels
+        self.macro_panel  = MacroPanel()
         self.config_panel = ConfigPanel()
-        self.log_panel = LogPanel()
+        self.log_panel    = LogPanel()
 
-        _page("⚡", "Automação",   _SidebarPage("Automação",   []),  self.macro_panel)
-        _page("⚙", "Configuração", _SidebarPage("Configuração", []), self.config_panel)
-        _page("📋", "Logs",        _SidebarPage("Logs",         []), self.log_panel)
+        for icon, tooltip, panel in [
+            ("⚡", "Automação",   self.macro_panel),
+            ("⚙", "Configuração", self.config_panel),
+            ("📋", "Logs",        self.log_panel),
+        ]:
+            self._add_page(icon, tooltip, _SidebarPage(tooltip), panel, ib_lay)
 
         ib_lay.addStretch(1)
 
-        # ── assemble ──────────────────────────────────────────────────────────
         right = QWidget()
         right_lay = QHBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
-        right_lay.addWidget(self._page_sidebar)
+        right_lay.addWidget(page_sidebar)
         right_lay.addWidget(self._stacked, 1)
 
         root.addWidget(icon_bar)
         root.addWidget(right, 1)
 
-        # Select first page
         self._switch_page(0)
-
-        self.statusBar().showMessage("Starting server...")
+        self.statusBar().showMessage("Iniciando servidor…")
         self.setStyleSheet(DARK_STYLE)
+
+    def _add_page(self, icon: str, tooltip: str,
+                  sidebar: QWidget, main: QWidget, ib_lay):
+        btn = QPushButton(icon)
+        btn.setCheckable(True)
+        btn.setToolTip(tooltip)
+        btn.setStyleSheet(_ICON_BTN_STYLE)
+        btn.setFixedSize(_ICON_BAR_W - 8, 44)
+        idx = len(self._icon_buttons)
+        self._page_stacked.addWidget(sidebar)
+        self._stacked.addWidget(main)
+        btn.clicked.connect(lambda _, i=idx: self._switch_page(i))
+        self._icon_buttons.append(btn)
+        ib_lay.addWidget(btn, 0, Qt.AlignHCenter)
 
     def _switch_page(self, index: int):
         self._page_stacked.setCurrentIndex(index)
@@ -215,26 +194,21 @@ class MainWindow(QMainWindow):
         self._send_command("list_com_ports", {"_silent": True})
 
     def _on_arduino_port_saved(self, port: str):
-        """Push the HID port config to all connected clients."""
         for cid in list(self._connected_clients):
             prev = self._active_client
             self._active_client = cid
             self._send_command("init_hid", {"port": port} if port else {})
             self._active_client = prev
-        label = port or "auto-detect"
-        self.log_panel.log("info", f"Arduino HID: porta configurada → {label}")
+        self.log_panel.log("info", f"Arduino HID: porta → {port or 'auto-detect'}")
 
     def _on_client_connected(self, client_id: str):
         self._connected_clients.add(client_id)
         self.config_panel.add_client(client_id)
-        self.log_panel.log("info", f"Cliente conectado: {client_id}")
-        # Push HID port config on connect
         arduino_port = _cfg.load().get("arduino", {}).get("port", "")
         prev = self._active_client
         self._active_client = client_id
         self._send_command("init_hid", {"port": arduino_port} if arduino_port else {})
         self._active_client = prev
-        # Auto-activate if no client is active yet
         if self._active_client is None:
             self._on_client_selected(client_id)
 
@@ -259,7 +233,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No client selected")
             return
         silent = params.pop("_silent", False)
-        if not silent and action not in ("get_pixels", "match_templates", "check_processes", "get_window_state"):
+        if not silent and action not in ("get_pixels", "match_templates",
+                                         "check_processes", "get_window_state"):
             param_str = ", ".join(f"{k}={v}" for k, v in params.items()) if params else "—"
             self.log_panel.log("cmd", f"{action}  {param_str}")
         self.server.send_command(self._active_client, action, params or None)
@@ -269,9 +244,7 @@ class MainWindow(QMainWindow):
             return
 
         action = msg.get("action", "")
-        ok = msg.get("ok", False)
-
-        if not ok:
+        if not msg.get("ok", False):
             err = msg.get("error", "?")
             self.statusBar().showMessage(f"Error: {err}")
             self.log_panel.log("error", f"{action} → {err}")
@@ -279,9 +252,8 @@ class MainWindow(QMainWindow):
 
         if action == "list_windows":
             windows = msg.get("data") or []
-            prev_count = getattr(self, "_last_window_count", None)
             self.macro_panel.update_remote_windows(windows)
-            if prev_count != len(windows):
+            if self._last_window_count != len(windows):
                 self.log_panel.log("resp", f"list_windows → {len(windows)} janelas")
             self._last_window_count = len(windows)
 
@@ -307,8 +279,7 @@ class MainWindow(QMainWindow):
             self.macro_panel.update_pixels(msg.get("data") or [])
 
         elif action == "match_templates":
-            data = msg.get("data") or {}
-            self.macro_panel.update_image_matches(data.get("results") or [])
+            self.macro_panel.update_image_matches((msg.get("data") or {}).get("results") or [])
 
         elif action == "open_process":
             pid = msg.get("data", {}).get("pid", "?")
@@ -318,7 +289,7 @@ class MainWindow(QMainWindow):
 
         elif action == "list_directory":
             data = msg.get("data") or {}
-            path = data.get("path", "")
+            path    = data.get("path", "")
             entries = data.get("entries", [])
             self.macro_panel.update_browser(entries, path)
             self.log_panel.log("resp", f"list_directory → {path}  ({len(entries)} itens)")
@@ -329,38 +300,32 @@ class MainWindow(QMainWindow):
     def _on_stop_hotkey(self):
         self.macro_panel.stop()
         self.log_panel.log("info", "⏹ Parado via Shift+Backspace")
-        self.statusBar().showMessage("Polling stopped")
+        self.statusBar().showMessage("Polling parado")
 
     # ── Persistência ──────────────────────────────────────────────────────────
 
     def _load_config(self):
         data = _cfg.load()
-        macros_data = data.get("macros")
-        if macros_data:
+        if macros_data := data.get("macros"):
             self.macro_panel.load_state(macros_data)
             self.log_panel.log("info", "Config carregado")
-
-        geo = data.get("geometry")
-        if geo:
+        if geo := data.get("geometry"):
             self.restoreGeometry(bytes.fromhex(geo))
-
-
         self._pb_login()
 
     def _pb_login(self):
         pb = _cfg.load().get("pocketbase", {})
-        url = pb.get("url", "").strip()
+        url   = pb.get("url", "").strip()
         email = pb.get("email", "").strip()
-        password = pb.get("password", "")
         if not url or not email:
             return
-        self._pb_thread = _PBAuthThread(url, email, password, self)
+        self._pb_thread = _PBAuthThread(url, email, pb.get("password", ""), self)
         self._pb_thread.success.connect(self._on_pb_auth_ok)
         self._pb_thread.failure.connect(self._on_pb_auth_fail)
         self.log_panel.log("info", "PocketBase: autenticando…")
         self._pb_thread.start()
 
-    def _on_pb_auth_ok(self, token: str):
+    def _on_pb_auth_ok(self, _token: str):
         self.log_panel.log("info", "PocketBase: sessão iniciada ✓")
         self.statusBar().showMessage("PocketBase OK", 3000)
         self.config_panel.set_pb_status(True, "sessão iniciada")
@@ -371,7 +336,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         data = _cfg.load()
-        data["macros"] = self.macro_panel.dump_state()
+        data["macros"]   = self.macro_panel.dump_state()
         data["geometry"] = bytes(self.saveGeometry()).hex()
         _cfg.save(data)
         self._hotkey.stop()

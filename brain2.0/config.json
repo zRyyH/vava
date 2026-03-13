@@ -1,0 +1,34 @@
+{
+  "macros": {
+    "polling_active": false,
+    "profiles": [
+      {
+        "name": "Janela 1",
+        "title_pattern": "",
+        "exe_path": "",
+        "enabled": true,
+        "macros": [
+          {
+            "name": "Macro 1",
+            "enabled": true,
+            "safety": {
+              "min_trigger_frames": 1,
+              "require_window_in_list": true
+            },
+            "triggers": [],
+            "image_triggers": [],
+            "window_triggers": [
+              {
+                "condition": "not_found",
+                "operator": "<",
+                "value": 100
+              }
+            ],
+            "actions": []
+          }
+        ]
+      }
+    ]
+  },
+  "geometry": "01d9d0cb00030000000001e00000038b0000089a000006f1000001e0000003aa0000089a000006f100000000000000000f00000001e0000003aa0000089a000006f1"
+}

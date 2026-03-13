@@ -1,0 +1,5 @@
+PySide6==6.10.2
+pocketbase==0.10.1
+websockets
+httpx>=0.25
+httpcore>=0.18

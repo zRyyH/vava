@@ -19,8 +19,10 @@ SWP_NOZORDER = 0x0004
 SWP_SHOWWINDOW = 0x0040
 
 GWL_STYLE = -16
+GWL_EXSTYLE = -20
 WS_OVERLAPPEDWINDOW = 0x00CF0000
 WS_POPUP = 0x80000000
+WS_EX_TOOLWINDOW = 0x00000080
 
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
@@ -128,6 +130,112 @@ def set_fullscreen(hwnd):
     cx = user32.GetSystemMetrics(SM_CXSCREEN)
     cy = user32.GetSystemMetrics(SM_CYSCREEN)
     user32.SetWindowPos(hwnd, 0, 0, 0, cx, cy, SWP_SHOWWINDOW)
+
+
+# --- Process / Window State ---
+
+TH32CS_SNAPPROCESS = 0x00000002
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+MAX_PATH = 260
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize",             w.DWORD),
+        ("cntUsage",           w.DWORD),
+        ("th32ProcessID",      w.DWORD),
+        ("th32DefaultHeapID",  ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID",       w.DWORD),
+        ("cntThreads",         w.DWORD),
+        ("th32ParentProcessID",w.DWORD),
+        ("pcPriClassBase",     ctypes.c_long),
+        ("dwFlags",            w.DWORD),
+        ("szExeFile",          ctypes.c_wchar * MAX_PATH),
+    ]
+
+
+def find_process_windows(exe_path: str) -> list[dict]:
+    """Return visible windows belonging to processes whose full path matches exe_path."""
+    kernel32 = ctypes.windll.kernel32
+    exe_path_lower = exe_path.lower().replace("/", "\\")
+
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == ctypes.c_void_p(-1).value:
+        return []
+
+    matching_pids: set[int] = set()
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+    try:
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, entry.th32ProcessID)
+            if h:
+                buf = ctypes.create_unicode_buffer(MAX_PATH)
+                size = w.DWORD(MAX_PATH)
+                kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+                kernel32.CloseHandle(h)
+                if buf.value.lower().replace("/", "\\") == exe_path_lower:
+                    matching_pids.add(entry.th32ProcessID)
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+
+    if not matching_pids:
+        return []
+
+    results: list[dict] = []
+
+    def _enum_cb(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        # Exclui janelas de ferramenta (tooltips, trays, splashes sem barra de tarefas)
+        ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if ex_style & WS_EX_TOOLWINDOW:
+            return True
+        pid = w.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value not in matching_pids:
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        rect = w.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        # Exclui janelas com dimensão zero (janelas auxiliares/fantasmas)
+        if width <= 0 or height <= 0:
+            return True
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        class_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, class_buf, 256)
+        tid = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        results.append({
+            "hwnd": hwnd,
+            "title": buf.value,
+            "pid": pid.value,
+            "tid": tid,
+            "class": class_buf.value,
+            "minimized": bool(user32.IsIconic(hwnd)),
+            "maximized": bool(user32.IsZoomed(hwnd)),
+            "focused": hwnd == user32.GetForegroundWindow(),
+            "x": rect.left,
+            "y": rect.top,
+            "right": rect.right,
+            "bottom": rect.bottom,
+            "width": width,
+            "height": height,
+            "style": style,
+            "ex_style": ex_style,
+        })
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+    user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+    return results
 
 
 # --- Pixel Reading ---
