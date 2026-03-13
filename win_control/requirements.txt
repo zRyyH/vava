@@ -1,2 +1,5 @@
+numpy==2.4.3
+opencv-python==4.13.0.92
+pillow==12.1.1
 pyserial==3.5
 websockets==16.0
